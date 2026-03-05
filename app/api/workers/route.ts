@@ -18,7 +18,15 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const body = await request.json();
-  const worker = await prisma.worker.create({ data: body });
-  return NextResponse.json(worker, { status: 201 });
+  try {
+    const body = await request.json();
+    const worker = await prisma.worker.create({ data: body });
+    return NextResponse.json(worker, { status: 201 });
+  } catch (err) {
+    console.error("POST /api/workers error:", err);
+    const msg = err instanceof Error && err.message.includes("Unique constraint")
+      ? "Ya existe un empleado con ese número de empleado"
+      : err instanceof Error ? err.message : "Error al crear empleado";
+    return NextResponse.json({ error: msg }, { status: 400 });
+  }
 }
