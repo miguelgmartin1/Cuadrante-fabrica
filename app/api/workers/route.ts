@@ -5,9 +5,11 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const subdepartment = searchParams.get("subdepartment");
 
+  const all = searchParams.get("all") === "true";
+
   const workers = await prisma.worker.findMany({
     where: {
-      active: true,
+      ...(all ? {} : { active: true }),
       ...(subdepartment ? { subdepartment } : {}),
     },
     orderBy: [{ subdepartment: "asc" }, { name: "asc" }],

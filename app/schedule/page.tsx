@@ -365,7 +365,7 @@ export default function SchedulePage() {
   const defaultColDef = useMemo<ColDef>(() => ({ resizable: true, suppressHeaderMenuButton: true }), []);
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
+    <div className="flex flex-col h-full bg-gray-50">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between gap-3 flex-wrap shadow-sm relative z-10">
         <h1 className="text-lg font-bold text-gray-800">Planificacion de Turnos</h1>
