@@ -608,14 +608,35 @@ export default function SchedulePage() {
   }, [bulkCode, bulkDateFrom, bulkDateTo, showToast]);
 
   const saveChanges = async () => {
-    if (!pendingChanges.length || !selectedVersionId) return;
+    if (!pendingChanges.length) return;
     setSaving(true);
     try {
+      // Auto-create a default version if none exists
+      let versionId = selectedVersionId;
+      if (!versionId) {
+        const vRes = await fetch("/api/versions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: `Cuadrante ${format(parseISO(dateFrom), "MMMM yyyy", { locale: es })}`,
+            periodStart: dateFrom,
+            periodEnd: dateTo,
+            createdBy: "usuario",
+          }),
+        });
+        if (!vRes.ok) throw new Error("No se pudo crear la versión");
+        const newVer: ScheduleVersion = await vRes.json();
+        setVersions((prev) => [newVer, ...prev]);
+        setSelectedVersionId(newVer.id);
+        versionId = newVer.id;
+      }
+
+      const total = pendingChanges.length;
       const res = await fetch("/api/assignments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          versionId: selectedVersionId,
+          versionId,
           changes: pendingChanges.map((p) => ({
             workerId: p.workerId,
             date: p.date,
@@ -625,12 +646,16 @@ export default function SchedulePage() {
           action: "BULK_UPDATE",
         }),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        const errData = await res.json().catch(async () => ({ error: await res.text() }));
+        throw new Error(errData.error || "Error desconocido");
+      }
       setPendingChanges([]);
       setManualWorkers([]);
-      showToast(`Guardado: ${pendingChanges.length} cambio(s)`);
+      showToast(`✓ Guardado: ${total} cambio(s)`);
     } catch (err) {
-      showToast("Error al guardar cambios", "error");
+      const msg = err instanceof Error ? err.message : "Error al guardar";
+      showToast(`Error: ${msg}`, "error");
       console.error(err);
     } finally {
       setSaving(false);
@@ -682,14 +707,12 @@ export default function SchedulePage() {
         <h1 className="text-lg font-bold text-gray-800">Planificacion de Turnos</h1>
 
         <div className="flex items-center gap-3 flex-wrap relative">
-          {versions.length > 0 && (
-            <VersionSelector
-              versions={versions}
-              selectedId={selectedVersionId}
-              onSelect={setSelectedVersionId}
-              onCreateVersion={handleCreateVersion}
-            />
-          )}
+          <VersionSelector
+            versions={versions}
+            selectedId={selectedVersionId}
+            onSelect={setSelectedVersionId}
+            onCreateVersion={handleCreateVersion}
+          />
           <div className="flex items-center gap-1">
             <label className="text-xs text-gray-500">Desde</label>
             <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="border rounded px-2 py-1 text-sm" />
