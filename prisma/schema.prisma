@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Worker {
+  id             String       @id @default(cuid())
+  name           String
+  employeeNumber String       @unique
+  subdepartment  String
+  position       String?
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  assignments    Assignment[]
+}
+
+model ShiftCode {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  label       String
+  color       String
+  textColor   String       @default("#000000")
+  isWorkDay   Boolean      @default(true)
+  hours       Float?
+  sortOrder   Int          @default(0)
+  assignments Assignment[]
+}
+
+model ScheduleVersion {
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  periodStart DateTime
+  periodEnd   DateTime
+  status      String        @default("DRAFT")
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  createdBy   String?
+  assignments Assignment[]
+  auditLogs   AuditLog[]
+}
+
+model Assignment {
+  id          String          @id @default(cuid())
+  workerId    String
+  date        DateTime        @db.Date
+  shiftCodeId String
+  versionId   String
+  note        String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  worker      Worker          @relation(fields: [workerId], references: [id])
+  shiftCode   ShiftCode       @relation(fields: [shiftCodeId], references: [id])
+  version     ScheduleVersion @relation(fields: [versionId], references: [id])
+
+  @@unique([workerId, date, versionId])
+  @@index([versionId, date])
+  @@index([workerId, versionId])
+}
+
+model AuditLog {
+  id        String          @id @default(cuid())
+  versionId String
+  action    String
+  workerId  String?
+  date      DateTime?       @db.Date
+  oldCode   String?
+  newCode   String?
+  changedBy String?
+  changedAt DateTime        @default(now())
+  metadata  String?
+  version   ScheduleVersion @relation(fields: [versionId], references: [id])
+}

@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* AG Grid overrides */
+.ag-theme-alpine .ag-header {
+  background-color: #f8fafc;
+}
+
+.ag-theme-alpine .ag-header-cell {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ag-theme-alpine .ag-cell {
+  line-height: 28px;
+  padding: 0 4px;
+}
+
+.ag-theme-alpine .ag-row-even {
+  background-color: #ffffff;
+}
+
+.ag-theme-alpine .ag-row-odd {
+  background-color: #fafafa;
+}
+
+.ag-theme-alpine .ag-row:hover {
+  background-color: #f0f7ff !important;
+}
+
+/* Weekend column headers */
+.weekend-header {
+  background-color: #f0f0f0 !important;
+  color: #666 !important;
+}
+
+/* Range selection highlight */
+.ag-theme-alpine .ag-cell-range-selected {
+  background-color: rgba(59, 130, 246, 0.15) !important;
+}
+
+/* Fill handle */
+.ag-theme-alpine .ag-fill-handle {
+  background-color: #2563eb;
+}
