@@ -128,6 +128,9 @@ export default function SchedulePage() {
   const pendingChangesRef = useRef<PendingChange[]>([]);
   pendingChangesRef.current = pendingChanges;
 
+  // Preserve user-edited horasAusencia across data reloads (not stored in DB)
+  const horasAusenciaOverridesRef = useRef<Record<string, string>>({});
+
   // Build row data from assignments response
   const buildRowData = useCallback(
     (assignments: { worker: Worker; shiftCode: ShiftCode; date: string }[]) => {
@@ -160,13 +163,14 @@ export default function SchedulePage() {
           depts.add(mw.subdepartment);
         }
       }
-      // Initialize horasAusencia for any row that doesn't have it yet
+      // Set horasAusencia: use user override if exists, otherwise calculate
       const currentDays = daysInRangeRef.current;
       if (currentDays.length > 0) {
         for (const row of Object.values(workerMap)) {
-          if (!row.horasAusencia) {
-            row.horasAusencia = String(calcHorasAusencia(row, currentDays));
-          }
+          const override = horasAusenciaOverridesRef.current[row.workerId];
+          row.horasAusencia = override !== undefined
+            ? override
+            : String(calcHorasAusencia(row, currentDays));
         }
       }
       return { rows: Object.values(workerMap), depts: Array.from(depts).sort() };
@@ -513,16 +517,16 @@ export default function SchedulePage() {
     const field = e.colDef.field;
     if (!field || FIXED_FIELDS.has(field)) return;
 
-    // HORAS AUSENCIA edit: update rowData so computedPinnedRow and pctAbsentismo refresh
+    // HORAS AUSENCIA edit: persist override and refresh summaries
     if (field === "horasAusencia") {
       const val = parseFloat(e.newValue as string);
       if (!isNaN(val) && val >= 0) {
+        horasAusenciaOverridesRef.current[e.data!.workerId] = String(val);
         setRowData((prev) =>
           prev.map((r) =>
             r.workerId === e.data!.workerId ? { ...r, horasAusencia: String(val) } : r
           )
         );
-        // Refresh pctAbsentismo for this row
         setTimeout(() => {
           gridRef.current?.api.refreshCells({ rowNodes: [e.node!], columns: ["pctAbsentismo"] });
         }, 0);
