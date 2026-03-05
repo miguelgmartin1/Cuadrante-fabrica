@@ -27,7 +27,8 @@ import AddWorkerModal from "@/components/AddWorkerModal";
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 const FIXED_FIELDS = new Set(["workerName", "employeeNumber", "subdepartment"]);
-const SUMMARY_FIELDS = new Set(["horasTeorDia", "horasTeorica", "horasAusencia", "pctAbsentismo"]);
+// horasAusencia is editable, so it's NOT in SUMMARY_FIELDS
+const SUMMARY_FIELDS = new Set(["horasTeorDia", "horasTeorica", "pctAbsentismo"]);
 const TOAST_DURATION = 3000;
 const POLL_INTERVAL = 10_000; // 10 seconds
 
@@ -60,6 +61,7 @@ export default function SchedulePage() {
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [daysInRange, setDaysInRange] = useState<string[]>([]);
+  const daysInRangeRef = useRef<string[]>([]);
 
   // Add worker modal
   const [addWorkerOpen, setAddWorkerOpen] = useState(false);
@@ -158,6 +160,15 @@ export default function SchedulePage() {
           depts.add(mw.subdepartment);
         }
       }
+      // Initialize horasAusencia for any row that doesn't have it yet
+      const currentDays = daysInRangeRef.current;
+      if (currentDays.length > 0) {
+        for (const row of Object.values(workerMap)) {
+          if (!row.horasAusencia) {
+            row.horasAusencia = String(calcHorasAusencia(row, currentDays));
+          }
+        }
+      }
       return { rows: Object.values(workerMap), depts: Array.from(depts).sort() };
     },
     []
@@ -241,6 +252,7 @@ export default function SchedulePage() {
     (from: string, to: string) => {
       const days = eachDayOfInterval({ start: parseISO(from), end: parseISO(to) });
       const dayKeys = days.map((d) => format(d, "yyyy-MM-dd"));
+      daysInRangeRef.current = dayKeys;
       setDaysInRange(dayKeys);
 
       const fixedCols: ColDef<GridRow>[] = [
@@ -411,17 +423,18 @@ export default function SchedulePage() {
           }),
         },
         {
-          colId: "horasAusencia",
           field: "horasAusencia",
           headerName: "HORAS AUSENCIA",
           pinned: "right",
           width: 105,
-          editable: false,
+          editable: (p) => p.data?.workerId !== "__totals__",
           sortable: false,
-          valueGetter: (p: ValueGetterParams<GridRow>) => {
-            if (!p.data) return 0;
-            if (p.data.workerId === "__totals__") return null;
-            return calcHorasAusencia(p.data, dayKeys);
+          valueSetter: (params) => {
+            if (params.data.workerId === "__totals__") return false;
+            const val = parseFloat(params.newValue as string);
+            if (isNaN(val) || val < 0) return false;
+            params.data.horasAusencia = String(val);
+            return true;
           },
           cellStyle: (p) => ({
             textAlign: "center" as const,
@@ -429,6 +442,7 @@ export default function SchedulePage() {
             fontWeight: "bold",
             background: p.data?.workerId === "__totals__" ? "#1e293b" : "#fef9c3",
             color: p.data?.workerId === "__totals__" ? "#fff" : "#854d0e",
+            cursor: p.data?.workerId !== "__totals__" ? "pointer" : "default",
           }),
         },
         {
@@ -442,7 +456,7 @@ export default function SchedulePage() {
           valueGetter: (p: ValueGetterParams<GridRow>) => {
             if (!p.data || p.data.workerId === "__totals__") return null;
             const teoricas = calcHorasTeoricas(p.data, dayKeys);
-            const ausencia = calcHorasAusencia(p.data, dayKeys);
+            const ausencia = parseFloat((p.data.horasAusencia as string) || "0");
             if (teoricas === 0) return null;
             return ((ausencia / teoricas) * 100).toFixed(2) + "%";
           },
@@ -474,7 +488,10 @@ export default function SchedulePage() {
   const computedPinnedRow = useMemo<GridRow[]>(() => {
     if (rowData.length === 0 || daysInRange.length === 0) return [];
     const totalHorasTeorica = rowData.reduce((sum, row) => sum + calcHorasTeoricas(row, daysInRange), 0);
-    const totalHorasAusencia = rowData.reduce((sum, row) => sum + calcHorasAusencia(row, daysInRange), 0);
+    const totalHorasAusencia = rowData.reduce(
+      (sum, row) => sum + parseFloat((row.horasAusencia as string) || "0"),
+      0
+    );
     const totalPct = totalHorasTeorica > 0
       ? ((totalHorasAusencia / totalHorasTeorica) * 100).toFixed(2) + "%"
       : "0.00%";
@@ -493,8 +510,31 @@ export default function SchedulePage() {
   }, [rowData, daysInRange]);
 
   const onCellValueChanged = useCallback((e: CellValueChangedEvent<GridRow>) => {
-    const dateKey = e.colDef.field;
-    if (!dateKey || FIXED_FIELDS.has(dateKey) || SUMMARY_FIELDS.has(dateKey)) return;
+    const field = e.colDef.field;
+    if (!field || FIXED_FIELDS.has(field)) return;
+
+    // HORAS AUSENCIA edit: update rowData so computedPinnedRow and pctAbsentismo refresh
+    if (field === "horasAusencia") {
+      const val = parseFloat(e.newValue as string);
+      if (!isNaN(val) && val >= 0) {
+        setRowData((prev) =>
+          prev.map((r) =>
+            r.workerId === e.data!.workerId ? { ...r, horasAusencia: String(val) } : r
+          )
+        );
+        // Refresh pctAbsentismo for this row
+        setTimeout(() => {
+          gridRef.current?.api.refreshCells({ rowNodes: [e.node!], columns: ["pctAbsentismo"] });
+        }, 0);
+      }
+      return; // not a DB-level change, don't add to pendingChanges
+    }
+
+    // Read-only summary fields
+    if (SUMMARY_FIELDS.has(field)) return;
+
+    // Day cell change
+    const dateKey = field;
     const newCode = ((e.newValue as string) ?? "").toUpperCase();
     const oldCode = (e.oldValue as string) ?? "";
     if (newCode === oldCode) return;
@@ -670,14 +710,22 @@ export default function SchedulePage() {
             + Añadir trabajador
           </button>
           {pendingChanges.length > 0 && (
-            <>
-              <span className="text-sm text-amber-600 font-medium">{pendingChanges.length} cambio(s) sin guardar</span>
-              <button onClick={discardChanges} className="text-sm px-3 py-1 border border-gray-300 rounded hover:bg-gray-50">Descartar</button>
-              <button onClick={saveChanges} disabled={saving} className="text-sm px-4 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 font-medium">
-                {saving ? "Guardando..." : "Guardar"}
-              </button>
-            </>
+            <span className="text-sm text-amber-600 font-medium">{pendingChanges.length} cambio(s) sin guardar</span>
           )}
+          <button
+            onClick={discardChanges}
+            disabled={pendingChanges.length === 0}
+            className="text-sm px-3 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Descartar
+          </button>
+          <button
+            onClick={saveChanges}
+            disabled={saving || pendingChanges.length === 0}
+            className="text-sm px-4 py-1 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+          >
+            {saving ? "Guardando..." : `Guardar${pendingChanges.length > 0 ? ` (${pendingChanges.length})` : ""}`}
+          </button>
           <button onClick={handleExport} className="text-sm px-3 py-1 border border-gray-300 rounded hover:bg-gray-50">
             Exportar Excel
           </button>
