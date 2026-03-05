@@ -11,6 +11,7 @@ import {
   CellValueChangedEvent,
   CellClassParams,
   RowSelectionOptions,
+  ValueGetterParams,
 } from "ag-grid-community";
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-alpine.css";
@@ -26,7 +27,23 @@ import AddWorkerModal from "@/components/AddWorkerModal";
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 const FIXED_FIELDS = new Set(["workerName", "employeeNumber", "subdepartment"]);
+const SUMMARY_FIELDS = new Set(["horasTeorDia", "horasTeorica", "horasAusencia", "pctAbsentismo"]);
 const TOAST_DURATION = 3000;
+const POLL_INTERVAL = 10_000; // 10 seconds
+
+// Codes that count as worked (theoretical hours)
+const WORKING_CODES = new Set(["M", "T", "N", "RM", "RT", "RN", "M-T", "R"]);
+
+function calcHorasTeoricas(row: GridRow, days: string[]): number {
+  return days.filter((d) => WORKING_CODES.has(row[d] as string)).length * 8;
+}
+
+function calcHorasAusencia(row: GridRow, days: string[]): number {
+  return days.filter((d) => {
+    const code = row[d] as string;
+    return code && !WORKING_CODES.has(code) && code !== "D" && code !== "d";
+  }).length * 8;
+}
 
 export default function SchedulePage() {
   const gridRef = useRef<AgGridReact<GridRow>>(null);
@@ -41,10 +58,11 @@ export default function SchedulePage() {
   const [pendingChanges, setPendingChanges] = useState<PendingChange[]>([]);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [daysInRange, setDaysInRange] = useState<string[]>([]);
 
   // Add worker modal
   const [addWorkerOpen, setAddWorkerOpen] = useState(false);
-  // Workers manually added to the grid (not yet saved with any assignment)
   const [manualWorkers, setManualWorkers] = useState<GridRow[]>([]);
   const workersInGrid = useMemo(() => new Set(rowData.map((r) => r.workerId)), [rowData]);
 
@@ -63,7 +81,6 @@ export default function SchedulePage() {
       const existingIds = new Set(prev.map((r) => r.workerId));
       return [...prev, ...newRows.filter((r) => !existingIds.has(r.workerId))];
     });
-    // Update subdepartment filter options
     setSubdepartments((prev) => {
       const next = new Set(prev);
       workers.forEach((w) => next.add(w.subdepartment));
@@ -106,8 +123,48 @@ export default function SchedulePage() {
   const manualWorkersRef = useRef<GridRow[]>([]);
   manualWorkersRef.current = manualWorkers;
 
+  const pendingChangesRef = useRef<PendingChange[]>([]);
+  pendingChangesRef.current = pendingChanges;
+
+  // Build row data from assignments response
+  const buildRowData = useCallback(
+    (assignments: { worker: Worker; shiftCode: ShiftCode; date: string }[]) => {
+      const workerMap: Record<string, GridRow> = {};
+      const depts = new Set<string>();
+      for (const a of assignments) {
+        const { worker, shiftCode, date } = a;
+        depts.add(worker.subdepartment);
+        if (!workerMap[worker.id]) {
+          workerMap[worker.id] = {
+            workerId: worker.id,
+            workerName: worker.name,
+            employeeNumber: worker.employeeNumber,
+            subdepartment: worker.subdepartment,
+          };
+        }
+        const dateKey = format(parseISO(date), "yyyy-MM-dd");
+        workerMap[worker.id][dateKey] = shiftCode.code;
+      }
+      // Re-apply any pending local changes on top of the fresh data
+      for (const change of pendingChangesRef.current) {
+        if (workerMap[change.workerId]) {
+          workerMap[change.workerId][change.date] = change.newCode;
+        }
+      }
+      // Re-add manually added workers not in result
+      for (const mw of manualWorkersRef.current) {
+        if (!workerMap[mw.workerId]) {
+          workerMap[mw.workerId] = { ...mw };
+          depts.add(mw.subdepartment);
+        }
+      }
+      return { rows: Object.values(workerMap), depts: Array.from(depts).sort() };
+    },
+    []
+  );
+
   const loadAssignments = useCallback(
-    (versionId: string, from: string, to: string, subdept: string) => {
+    (versionId: string, from: string, to: string, subdept: string, silent = false) => {
       const params = new URLSearchParams({
         versionId,
         dateFrom: from,
@@ -117,35 +174,14 @@ export default function SchedulePage() {
       fetch(`/api/assignments?${params}`)
         .then((r) => r.json())
         .then((assignments) => {
-          const workerMap: Record<string, GridRow> = {};
-          const depts = new Set<string>();
-          for (const a of assignments) {
-            const { worker, shiftCode, date } = a;
-            depts.add(worker.subdepartment);
-            if (!workerMap[worker.id]) {
-              workerMap[worker.id] = {
-                workerId: worker.id,
-                workerName: worker.name,
-                employeeNumber: worker.employeeNumber,
-                subdepartment: worker.subdepartment,
-              };
-            }
-            const dateKey = format(parseISO(date), "yyyy-MM-dd");
-            workerMap[worker.id][dateKey] = shiftCode.code;
-          }
-          // Re-add manually added workers that are not yet in the result
-          for (const mw of manualWorkersRef.current) {
-            if (!workerMap[mw.workerId]) {
-              workerMap[mw.workerId] = mw;
-              depts.add(mw.subdepartment);
-            }
-          }
-          setSubdepartments(Array.from(depts).sort());
-          setRowData(Object.values(workerMap));
-          setPendingChanges([]);
+          const { rows, depts } = buildRowData(assignments);
+          setSubdepartments(depts);
+          setRowData(rows);
+          if (!silent) setPendingChanges([]);
+          setLastUpdated(new Date());
         });
     },
-    []
+    [buildRowData]
   );
 
   useEffect(() => {
@@ -153,9 +189,59 @@ export default function SchedulePage() {
     loadAssignments(selectedVersionId, dateFrom, dateTo, subdepartmentFilter);
   }, [selectedVersionId, dateFrom, dateTo, subdepartmentFilter, loadAssignments]);
 
+  // Real-time collaboration: poll every POLL_INTERVAL when there are no pending changes
+  const selectedVersionIdRef = useRef(selectedVersionId);
+  selectedVersionIdRef.current = selectedVersionId;
+  const dateFromRef = useRef(dateFrom);
+  dateFromRef.current = dateFrom;
+  const dateToRef = useRef(dateTo);
+  dateToRef.current = dateTo;
+  const subdeptFilterRef = useRef(subdepartmentFilter);
+  subdeptFilterRef.current = subdepartmentFilter;
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!selectedVersionIdRef.current) return;
+      // Only silent-poll if user has no pending changes
+      if (pendingChangesRef.current.length > 0) return;
+      loadAssignments(
+        selectedVersionIdRef.current,
+        dateFromRef.current,
+        dateToRef.current,
+        subdeptFilterRef.current,
+        true
+      );
+    }, POLL_INTERVAL);
+    return () => clearInterval(interval);
+  }, [loadAssignments]);
+
+  // Pinned bottom (totals) row
+  const pinnedBottomRowData = useMemo<GridRow[]>(() => {
+    if (rowData.length === 0) return [];
+    const totals: GridRow = {
+      workerId: "__totals__",
+      workerName: "TOTAL",
+      employeeNumber: "",
+      subdepartment: "",
+    };
+    // Sum all date keys
+    for (const row of rowData) {
+      for (const [key, value] of Object.entries(row)) {
+        if (FIXED_FIELDS.has(key) || key === "workerId" || SUMMARY_FIELDS.has(key)) continue;
+        if (value && value !== "") {
+          // We just mark existence; actual totals are via valueGetter
+          totals[key] = (totals[key] as string) || "";
+        }
+      }
+    }
+    return [totals];
+  }, [rowData]);
+
   const buildColumns = useCallback(
     (from: string, to: string) => {
       const days = eachDayOfInterval({ start: parseISO(from), end: parseISO(to) });
+      const dayKeys = days.map((d) => format(d, "yyyy-MM-dd"));
+      setDaysInRange(dayKeys);
 
       const fixedCols: ColDef<GridRow>[] = [
         {
@@ -165,7 +251,15 @@ export default function SchedulePage() {
           width: 200,
           editable: false,
           lockPosition: true,
-          cellStyle: { fontWeight: "600", fontSize: "12px" },
+          cellStyle: (p) => {
+            const isTotal = p.data?.workerId === "__totals__";
+            return {
+              fontWeight: "bold",
+              fontSize: "12px",
+              background: isTotal ? "#1e293b" : "white",
+              color: isTotal ? "#fff" : "#111827",
+            };
+          },
         },
         {
           field: "employeeNumber",
@@ -174,7 +268,14 @@ export default function SchedulePage() {
           width: 75,
           editable: false,
           lockPosition: true,
-          cellStyle: { fontSize: "11px", color: "#666" },
+          cellStyle: (p) => {
+            const isTotal = p.data?.workerId === "__totals__";
+            return {
+              fontSize: "11px",
+              color: isTotal ? "#fff" : "#666",
+              background: isTotal ? "#1e293b" : "white",
+            };
+          },
         },
         {
           field: "subdepartment",
@@ -183,7 +284,14 @@ export default function SchedulePage() {
           width: 110,
           editable: false,
           lockPosition: true,
-          cellStyle: { fontSize: "11px" },
+          cellStyle: (p) => {
+            const isTotal = p.data?.workerId === "__totals__";
+            return {
+              fontSize: "11px",
+              background: isTotal ? "#1e293b" : "white",
+              color: isTotal ? "#fff" : "#374151",
+            };
+          },
         },
       ];
 
@@ -200,16 +308,27 @@ export default function SchedulePage() {
           field: dateKey,
           headerName: format(d, "d"),
           width: 46,
-          editable: true,
+          editable: (p) => p.data?.workerId !== "__totals__",
           sortable: false,
           headerClass: isWeekend ? "weekend-header" : "",
           valueSetter: (params) => {
+            if (params.data.workerId === "__totals__") return false;
             const raw = ((params.newValue ?? "") as string).trim().toUpperCase();
             if (raw && !codeMapRef.current[raw]) return false;
             params.data[dateKey] = raw;
             return true;
           },
           cellStyle: (params: CellClassParams<GridRow>) => {
+            if (params.data?.workerId === "__totals__") {
+              return {
+                backgroundColor: "#1e293b",
+                color: "#fff",
+                fontWeight: "bold",
+                fontSize: "10px",
+                textAlign: "center" as const,
+                padding: "0",
+              };
+            }
             const code = params.value as string;
             const sc = codeMapRef.current[code];
             const base = {
@@ -222,12 +341,7 @@ export default function SchedulePage() {
               cursor: "pointer",
             };
             if (sc) {
-              return {
-                ...base,
-                backgroundColor: sc.color,
-                color: sc.textColor,
-                fontWeight: "bold",
-              };
+              return { ...base, backgroundColor: sc.color, color: sc.textColor, fontWeight: "bold" };
             }
             return base;
           },
@@ -252,7 +366,100 @@ export default function SchedulePage() {
         marryChildren: true,
       }));
 
-      setColDefs([...fixedCols, ...groupedCols]);
+      // Summary columns (pinned right)
+      const summaryCols: ColDef<GridRow>[] = [
+        {
+          colId: "horasTeorDia",
+          field: "horasTeorDia",
+          headerName: "H.TEÓR/DÍA",
+          pinned: "right",
+          width: 80,
+          editable: false,
+          sortable: false,
+          valueGetter: () => 8,
+          cellStyle: (p) => ({
+            textAlign: "center" as const,
+            fontSize: "11px",
+            fontWeight: "bold",
+            background: p.data?.workerId === "__totals__" ? "#1e293b" : "#f8fafc",
+            color: p.data?.workerId === "__totals__" ? "#fff" : "#334155",
+            borderLeft: "2px solid #cbd5e1",
+          }),
+        },
+        {
+          colId: "horasTeorica",
+          field: "horasTeorica",
+          headerName: "HORAS TEÓRICAS",
+          pinned: "right",
+          width: 100,
+          editable: false,
+          sortable: false,
+          valueGetter: (p: ValueGetterParams<GridRow>) => {
+            if (!p.data) return 0;
+            if (p.data.workerId === "__totals__") {
+              // Sum all rows via the grid API - use raw data sum instead
+              return null; // calculated separately via pinnedBottomRowData
+            }
+            return calcHorasTeoricas(p.data, dayKeys);
+          },
+          cellStyle: (p) => ({
+            textAlign: "center" as const,
+            fontSize: "11px",
+            fontWeight: "bold",
+            background: p.data?.workerId === "__totals__" ? "#1e293b" : "#f0fdf4",
+            color: p.data?.workerId === "__totals__" ? "#fff" : "#166534",
+          }),
+        },
+        {
+          colId: "horasAusencia",
+          field: "horasAusencia",
+          headerName: "HORAS AUSENCIA",
+          pinned: "right",
+          width: 105,
+          editable: false,
+          sortable: false,
+          valueGetter: (p: ValueGetterParams<GridRow>) => {
+            if (!p.data) return 0;
+            if (p.data.workerId === "__totals__") return null;
+            return calcHorasAusencia(p.data, dayKeys);
+          },
+          cellStyle: (p) => ({
+            textAlign: "center" as const,
+            fontSize: "11px",
+            fontWeight: "bold",
+            background: p.data?.workerId === "__totals__" ? "#1e293b" : "#fef9c3",
+            color: p.data?.workerId === "__totals__" ? "#fff" : "#854d0e",
+          }),
+        },
+        {
+          colId: "pctAbsentismo",
+          field: "pctAbsentismo",
+          headerName: "% ABSENTISMO",
+          pinned: "right",
+          width: 100,
+          editable: false,
+          sortable: false,
+          valueGetter: (p: ValueGetterParams<GridRow>) => {
+            if (!p.data || p.data.workerId === "__totals__") return null;
+            const teoricas = calcHorasTeoricas(p.data, dayKeys);
+            const ausencia = calcHorasAusencia(p.data, dayKeys);
+            if (teoricas === 0) return null;
+            return ((ausencia / teoricas) * 100).toFixed(2) + "%";
+          },
+          cellStyle: (p) => {
+            const val = p.value as string;
+            const pct = val ? parseFloat(val) : 0;
+            let bg = "#f0fdf4";
+            let color = "#166534";
+            if (pct > 10) { bg = "#fef2f2"; color = "#991b1b"; }
+            else if (pct > 5) { bg = "#fff7ed"; color = "#9a3412"; }
+            if (p.data?.workerId === "__totals__") { bg = "#1e293b"; color = "#fff"; }
+            return { textAlign: "center" as const, fontSize: "11px", fontWeight: "bold", background: bg, color };
+          },
+        },
+      ];
+
+      setColDefs([...fixedCols, ...groupedCols, ...summaryCols]);
     },
     []
   );
@@ -263,9 +470,31 @@ export default function SchedulePage() {
     }
   }, [codeMap, buildColumns, dateFrom, dateTo]);
 
+  // Compute pinned totals row dynamically
+  const computedPinnedRow = useMemo<GridRow[]>(() => {
+    if (rowData.length === 0 || daysInRange.length === 0) return [];
+    const totalHorasTeorica = rowData.reduce((sum, row) => sum + calcHorasTeoricas(row, daysInRange), 0);
+    const totalHorasAusencia = rowData.reduce((sum, row) => sum + calcHorasAusencia(row, daysInRange), 0);
+    const totalPct = totalHorasTeorica > 0
+      ? ((totalHorasAusencia / totalHorasTeorica) * 100).toFixed(2) + "%"
+      : "0.00%";
+
+    const totalsRow: GridRow = {
+      workerId: "__totals__",
+      workerName: `TOTAL (${rowData.length} empleados)`,
+      employeeNumber: "",
+      subdepartment: "",
+      horasTeorDia: "8",
+      horasTeorica: String(totalHorasTeorica),
+      horasAusencia: String(totalHorasAusencia),
+      pctAbsentismo: totalPct,
+    };
+    return [totalsRow];
+  }, [rowData, daysInRange]);
+
   const onCellValueChanged = useCallback((e: CellValueChangedEvent<GridRow>) => {
     const dateKey = e.colDef.field;
-    if (!dateKey || FIXED_FIELDS.has(dateKey)) return;
+    if (!dateKey || FIXED_FIELDS.has(dateKey) || SUMMARY_FIELDS.has(dateKey)) return;
     const newCode = ((e.newValue as string) ?? "").toUpperCase();
     const oldCode = (e.oldValue as string) ?? "";
     if (newCode === oldCode) return;
@@ -452,6 +681,11 @@ export default function SchedulePage() {
           <button onClick={handleExport} className="text-sm px-3 py-1 border border-gray-300 rounded hover:bg-gray-50">
             Exportar Excel
           </button>
+          {lastUpdated && (
+            <span className="text-xs text-gray-400">
+              Act: {format(lastUpdated, "HH:mm:ss")}
+            </span>
+          )}
         </div>
       </header>
 
@@ -502,6 +736,7 @@ export default function SchedulePage() {
             headerHeight={32}
             groupHeaderHeight={26}
             getRowId={(params) => params.data.workerId}
+            pinnedBottomRowData={computedPinnedRow}
           />
         </div>
       </div>
@@ -512,6 +747,7 @@ export default function SchedulePage() {
         <span>Ctrl+C / Ctrl+V: copiar/pegar</span>
         <span>Ctrl+Z / Ctrl+Y: deshacer/rehacer</span>
         <span>Checkbox: seleccion multiple de filas para aplicacion masiva</span>
+        <span className="text-green-600 font-medium">Actualización automática cada 10s</span>
       </div>
 
       {/* Toast */}
