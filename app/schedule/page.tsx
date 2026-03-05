@@ -18,9 +18,10 @@ import "ag-grid-community/styles/ag-theme-alpine.css";
 import { format, eachDayOfInterval, parseISO, startOfMonth, endOfMonth } from "date-fns";
 import { es } from "date-fns/locale";
 
-import { ShiftCode, ScheduleVersion, GridRow, PendingChange } from "@/types/schedule";
+import { ShiftCode, ScheduleVersion, GridRow, PendingChange, Worker } from "@/types/schedule";
 import Legend from "@/components/Legend";
 import VersionSelector from "@/components/VersionSelector";
+import AddWorkerModal from "@/components/AddWorkerModal";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -40,6 +41,35 @@ export default function SchedulePage() {
   const [pendingChanges, setPendingChanges] = useState<PendingChange[]>([]);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
+
+  // Add worker modal
+  const [addWorkerOpen, setAddWorkerOpen] = useState(false);
+  // Workers manually added to the grid (not yet saved with any assignment)
+  const [manualWorkers, setManualWorkers] = useState<GridRow[]>([]);
+  const workersInGrid = useMemo(() => new Set(rowData.map((r) => r.workerId)), [rowData]);
+
+  const handleAddWorkers = useCallback((workers: Worker[]) => {
+    const newRows: GridRow[] = workers.map((w) => ({
+      workerId: w.id,
+      workerName: w.name,
+      employeeNumber: w.employeeNumber,
+      subdepartment: w.subdepartment,
+    }));
+    setManualWorkers((prev) => {
+      const existingIds = new Set(prev.map((r) => r.workerId));
+      return [...prev, ...newRows.filter((r) => !existingIds.has(r.workerId))];
+    });
+    setRowData((prev) => {
+      const existingIds = new Set(prev.map((r) => r.workerId));
+      return [...prev, ...newRows.filter((r) => !existingIds.has(r.workerId))];
+    });
+    // Update subdepartment filter options
+    setSubdepartments((prev) => {
+      const next = new Set(prev);
+      workers.forEach((w) => next.add(w.subdepartment));
+      return Array.from(next).sort();
+    });
+  }, []);
 
   // Bulk apply state
   const [bulkCode, setBulkCode] = useState<string>("");
@@ -73,6 +103,9 @@ export default function SchedulePage() {
     });
   }, []);
 
+  const manualWorkersRef = useRef<GridRow[]>([]);
+  manualWorkersRef.current = manualWorkers;
+
   const loadAssignments = useCallback(
     (versionId: string, from: string, to: string, subdept: string) => {
       const params = new URLSearchParams({
@@ -99,6 +132,13 @@ export default function SchedulePage() {
             }
             const dateKey = format(parseISO(date), "yyyy-MM-dd");
             workerMap[worker.id][dateKey] = shiftCode.code;
+          }
+          // Re-add manually added workers that are not yet in the result
+          for (const mw of manualWorkersRef.current) {
+            if (!workerMap[mw.workerId]) {
+              workerMap[mw.workerId] = mw;
+              depts.add(mw.subdepartment);
+            }
           }
           setSubdepartments(Array.from(depts).sort());
           setRowData(Object.values(workerMap));
@@ -318,6 +358,7 @@ export default function SchedulePage() {
       });
       if (!res.ok) throw new Error(await res.text());
       setPendingChanges([]);
+      setManualWorkers([]);
       showToast(`Guardado: ${pendingChanges.length} cambio(s)`);
     } catch (err) {
       showToast("Error al guardar cambios", "error");
@@ -329,6 +370,7 @@ export default function SchedulePage() {
 
   const discardChanges = () => {
     if (!selectedVersionId) return;
+    setManualWorkers([]);
     loadAssignments(selectedVersionId, dateFrom, dateTo, subdepartmentFilter);
     showToast("Cambios descartados");
   };
@@ -392,6 +434,12 @@ export default function SchedulePage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setAddWorkerOpen(true)}
+            className="text-sm px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 font-medium"
+          >
+            + Añadir trabajador
+          </button>
           {pendingChanges.length > 0 && (
             <>
               <span className="text-sm text-amber-600 font-medium">{pendingChanges.length} cambio(s) sin guardar</span>
@@ -472,6 +520,14 @@ export default function SchedulePage() {
           {toast.msg}
         </div>
       )}
+
+      {/* Add Worker Modal */}
+      <AddWorkerModal
+        open={addWorkerOpen}
+        onClose={() => setAddWorkerOpen(false)}
+        alreadyInGrid={workersInGrid}
+        onAdd={handleAddWorkers}
+      />
     </div>
   );
 }
